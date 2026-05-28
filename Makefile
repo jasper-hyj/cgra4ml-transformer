@@ -27,6 +27,12 @@ smoke_attention_softmax: $(WORKDIR)
 test_softmax_export: $(WORKDIR)
 	cd $(WORKDIR) && python -m pytest -s ../../tests/test_softmax_export.py
 
+smoke_multi_head_attention: $(WORKDIR)
+	cd $(WORKDIR) && python -m pytest -s ../multi_head_attention.py
+
+test_multi_head_attention: $(WORKDIR)
+	cd $(WORKDIR) && python -m pytest -s ../../tests/test_multi_head_attention.py
+
 verify_ibex: $(WORKDIR)
 	cd ibex-soc && python check_output.py
 

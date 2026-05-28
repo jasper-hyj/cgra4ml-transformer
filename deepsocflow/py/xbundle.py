@@ -46,10 +46,22 @@ class XBundle(Layer):
         self.out_w_consumer_ib = -1  # ib of the bundle that will read this bundle's output as weights
         self.allow_mismatch = False  # true when int path intentionally diverges from float reference
 
+        # Multi-head concat fields (wired in call() when concat_srcs is provided)
+        # cat_src_ibs holds the bundle indices of extra sources concatenated along the last
+        # axis BEFORE the primary input (prev_ib). The primary input is appended last so
+        # that concat([cat_src_0, ..., cat_src_k-1, primary], axis=-1) gives the full tensor.
+        self.cat_src_ibs = []
 
-    def call(self, input_tensor, w_src=None, x_add=None, training=False):
 
+    def call(self, input_tensor, w_src=None, x_add=None, concat_srcs=None, training=False):
+        """
+        concat_srcs: optional list of tensors (each with an .ib attribute) whose outputs
+        are concatenated along the last axis BEFORE input_tensor to form the actual core
+        input.  Example for 2-head attention:
+            out = b_wo(h1, concat_srcs=[h0])  →  core sees concat([h0, h1], axis=-1)
+        """
         self.ib = len(BUNDLES)
+        self.cat_src_ibs = []   # reset on each call so re-exports are idempotent
         BUNDLES.append(self)
 
         x = input_tensor
@@ -57,12 +69,24 @@ class XBundle(Layer):
             self.prev_ib = x.ib
             BUNDLES[self.prev_ib].next_ibs += [self.ib]
 
+        # ── CONCAT pre-processing ─────────────────────────────────────────────
+        # Concatenate additional source tensors with the primary input along the
+        # last (channel/feature) axis before passing to the core layer.
+        if concat_srcs is not None:
+            for cs in concat_srcs:
+                if hasattr(cs, 'ib'):
+                    self.cat_src_ibs.append(cs.ib)
+                    BUNDLES[cs.ib].next_ibs += [self.ib]
+            parts = list(concat_srcs) + [x]
+            x = tf.concat(parts, axis=-1)
+        # ─────────────────────────────────────────────────────────────────────
+
         if w_src is not None and hasattr(w_src, "ib"):
             self.w_src_ib = w_src.ib
             BUNDLES[w_src.ib].next_w_ib = self.ib
             BUNDLES[w_src.ib].out_w_consumer_ib = self.ib
 
-        print(f"{self.ib} x: {x.shape}, prev:{self.prev_ib}, w_src_ib:{self.w_src_ib}")
+        print(f"{self.ib} x: {x.shape}, prev:{self.prev_ib}, w_src_ib:{self.w_src_ib}, cat_src_ibs:{self.cat_src_ibs}")
 
         if self.w_src_ib is not None:
             # Dynamic weights: compute activation @ w_src in float for verification
@@ -98,13 +122,29 @@ class XBundle(Layer):
     
     def call_int(self, x, hw):
 
-        # prev_ib is None for bundles that read directly from the model input (fan-out safe)
-        self.inp = x if self.prev_ib is None else BUNDLES[self.prev_ib].out
+        # ── CONCAT pre-processing (integer path) ─────────────────────────────
+        # If this bundle has concat sources, concatenate their integer outputs
+        # with the primary input along the last axis before feeding the core.
+        if self.cat_src_ibs:
+            parts = [BUNDLES[ib].out for ib in self.cat_src_ibs]
+            parts.append(BUNDLES[self.prev_ib].out)
+            cat_frac = parts[0].frac
+            cat_bits = parts[0].bits
+            assert all(p.frac == cat_frac for p in parts), (
+                f"concat_srcs frac mismatch for bundle {self.ib}: {[p.frac for p in parts]}")
+            cat_t = tf.concat([p.itensor for p in parts], axis=-1)
+            self.inp = XTensor(tensor=cat_t, bits=cat_bits, frac=cat_frac, from_int=True)
+        else:
+            # prev_ib is None for bundles that read directly from the model input (fan-out safe)
+            self.inp = x if self.prev_ib is None else BUNDLES[self.prev_ib].out
+        # ─────────────────────────────────────────────────────────────────────
 
         prev_has_softmax = self.prev_ib is not None and BUNDLES[self.prev_ib].softmax is not None
         prev_allow_mismatch = self.prev_ib is not None and getattr(BUNDLES[self.prev_ib], 'allow_mismatch', False)
         w_src_allow_mismatch = self.w_src_ib is not None and getattr(BUNDLES[self.w_src_ib], 'allow_mismatch', False)
-        allow_mismatch = prev_has_softmax or prev_allow_mismatch or w_src_allow_mismatch
+        cat_src_allow_mismatch = any(
+            getattr(BUNDLES[ib], 'allow_mismatch', False) for ib in self.cat_src_ibs)
+        allow_mismatch = prev_has_softmax or prev_allow_mismatch or w_src_allow_mismatch or cat_src_allow_mismatch
         validate_core = not allow_mismatch
 
         if self.w_src_ib is not None:

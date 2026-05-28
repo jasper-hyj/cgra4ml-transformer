@@ -31,6 +31,12 @@ typedef const struct {
   const i8   out_w_buffer_idx, in_w_buffer_idx; // dynamic weight buffers: producer writes w_bufs[out_w_buffer_idx]; consumer reads via b_offset into w_bufs[in_w_buffer_idx]
   const i8   out_w_consumer_ib; // ib of the bundle that reads this bundle's output as weights (-1 = none)
   const i8   is_bias, is_pool, is_flatten, is_softmax, transpose_w_src;
+  // Multi-head concat: is_concat=1 signals that this bundle's X input must be assembled by
+  // concatenating n_concat_srcs source buffers (concat_src_ib_0..3) followed by the primary
+  // input (in_buffer_idx) along the channel axis before DMA dispatch.
+  // NOTE: concat buffer assembly in the C runtime is a TODO; Python export is complete.
+  const i8   is_concat, n_concat_srcs;
+  const i8   concat_src_ib_0, concat_src_ib_1, concat_src_ib_2, concat_src_ib_3;
   const i8   x_pad, b_val_shift, b_bias_shift, ca_nzero, ca_shift, ca_pl_scale, aa_nzero, aa_shift, aa_pl_scale, pa_nzero, pa_shift, pa_pl_scale, softmax_frac;
   const i8   csh, csh_shift, psh_shift, csw, csw_shift, psw_shift, pool;
   const i32  softmax_max_i;
